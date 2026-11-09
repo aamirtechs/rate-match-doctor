@@ -1,0 +1,559 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Rate Match Doctor - AamirTechs</title>
+<style>
+:root{--navy:#0b1f3a;--gold:#d4a72c;--bg:#f6f8fb;--ink:#1c2733;--muted:#5b6b7c;--line:#d9e1ea}
+*{box-sizing:border-box}
+body{margin:0;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif;background:var(--bg);color:var(--ink)}
+header{background:var(--navy);color:#fff;padding:28px 20px;border-bottom:4px solid var(--gold)}
+header .wrap{max-width:880px;margin:0 auto}
+header h1{margin:0 0 6px;font-size:1.6rem}
+header p{margin:0;color:#c8d4e4}
+main{max-width:880px;margin:24px auto;padding:0 20px}
+.card{background:#fff;border:1px solid var(--line);border-radius:12px;padding:20px;box-shadow:0 1px 3px rgba(11,31,58,.08)}
+label{display:block;font-weight:600;margin:14px 0 6px}
+.card>label:first-child{margin-top:0}
+textarea{width:100%;min-height:160px;padding:10px;border:1px solid var(--line);border-radius:8px;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:.85rem}
+input[type=text],input[type=number],select{padding:8px 10px;border:1px solid var(--line);border-radius:8px;font-size:.95rem;width:100%}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px;margin-top:4px}
+.grid label{margin:0 0 6px}
+.row{display:flex;flex-wrap:wrap;gap:10px;margin-top:16px}
+button{background:var(--navy);color:#fff;border:0;border-radius:8px;padding:10px 18px;font-size:.95rem;cursor:pointer}
+button.alt{background:#fff;color:var(--navy);border:1px solid var(--navy)}
+button.gold{background:var(--gold);color:#0b1f3a;font-weight:600}
+pre{background:#0b1f3a;color:#eef3f9;border-radius:8px;padding:16px;overflow-x:auto;white-space:pre-wrap;word-break:break-word;min-height:60px;font-size:.85rem}
+footer{max-width:880px;margin:0 auto 32px;padding:0 20px;color:var(--muted);font-size:.9rem}
+footer a{color:var(--navy)}
+.hint{color:var(--muted);font-size:.85rem;margin-top:6px;font-weight:400}
+</style>
+</head>
+<body>
+<header><div class="wrap"><h1>Rate Match Doctor</h1><p>Reconcile a broker rate confirmation against the carrier invoice for the same loads, comparing linehaul, fuel surcharge, detention, lumper, and other accessorials line by line.</p></div></header>
+<main><div class="card">
+<label for="file1">Rate confirmation JSON file</label>
+<input type="file" id="file1" accept=".json,application/json">
+<label for="input">Or paste the rate confirmation JSON</label>
+<textarea id="input" spellcheck="false" placeholder="Paste the rate confirmation JSON here, or load the sample."></textarea>
+<label for="file2">Invoice JSON file</label>
+<input type="file" id="file2" accept=".json,application/json">
+<label for="input2">Or paste the invoice JSON</label>
+<textarea id="input2" spellcheck="false" placeholder="Paste the carrier invoice JSON here, or load the sample."></textarea>
+<div class="grid">
+<div><label for="opt-tolerance">Tolerance in dollars (CLI --tolerance)</label><input type="number" id="opt-tolerance" step="any" value="0.01"></div>
+</div>
+<div class="row"><button class="gold" id="run" type="button">Run</button><button class="alt" id="sample" type="button">Load sample</button><button class="alt" id="sample-mismatch" type="button">Load mismatch sample</button><button class="alt" id="sample-duplicate" type="button">Load duplicate sample</button><button class="alt" id="download" type="button">Download report</button></div>
+<label for="out">Report</label>
+<pre id="out">Your report will appear here.</pre>
+</div></main>
+<footer>
+<p>Built by AamirTechs. <a href="https://aamirtechs.github.io/">All tools</a> | <a href="https://github.com/aamirtechs/rate-match-doctor">Source</a></p>
+<p>Privacy: this tool runs 100% in your browser, nothing is uploaded.</p>
+</footer>
+<script id="core">
+// Pure logic port of rate_match_doctor.py. No DOM access in this block.
+// Decimals are {c: BigInt coefficient, e: exponent} with value c * 10^e,
+// mirroring Python Decimal behaviour for the operations used here. Money
+// is quantized to cents, half up, exactly like the CLI.
+// window.runTool(inputText, options): inputText is the rate confirmation
+// JSON text (the CLI first file), options.invoiceText is the invoice JSON
+// text (the CLI second file), and options.tolerance is the CLI
+// --tolerance value in dollars (default 0.01). Returns the CLI text report.
+function Dec(v) {
+  if (v && typeof v === "object" && typeof v.c === "bigint") return v;
+  if (typeof v !== "string" && typeof v !== "number") throw new Error("not a number");
+  var s = String(v).trim();
+  var m = /^([+-]?)(?:(\d+)(?:\.(\d*))?|\.(\d+))(?:[eE]([+-]?\d+))?$/.exec(s);
+  if (!m) throw new Error("not a number: " + s);
+  var intPart = m[2] || "";
+  var fracPart = (m[3] !== undefined ? m[3] : (m[4] || ""));
+  var exp = (m[5] ? parseInt(m[5], 10) : 0) - fracPart.length;
+  var digits = (intPart + fracPart).replace(/^0+/, "");
+  if (digits === "") return { c: 0n, e: exp };
+  var c = BigInt(digits);
+  if (m[1] === "-") c = -c;
+  return { c: c, e: exp };
+}
+function decStr(d) {
+  if (d.c === 0n) {
+    if (d.e >= 0) return "0" + "0".repeat(d.e);
+    var z = "0.";
+    for (var i = 0; i < -d.e - 1; i++) z += "0";
+    return z + "0";
+  }
+  var neg = d.c < 0n;
+  var digits = (neg ? -d.c : d.c).toString();
+  var out;
+  if (d.e >= 0) out = digits + "0".repeat(d.e);
+  else {
+    var pos = digits.length + d.e;
+    if (pos > 0) out = digits.slice(0, pos) + "." + digits.slice(pos);
+    else out = "0." + "0".repeat(-pos) + digits;
+  }
+  return (neg ? "-" : "") + out;
+}
+function decAdd(a, b) {
+  var e = Math.min(a.e, b.e);
+  var ca = a.c * (10n ** BigInt(a.e - e));
+  var cb = b.c * (10n ** BigInt(b.e - e));
+  return { c: ca + cb, e: e };
+}
+function decSub(a, b) { return decAdd(a, { c: -b.c, e: b.e }); }
+function decCmp(a, b) {
+  var d = decSub(a, b);
+  return d.c < 0n ? -1 : (d.c > 0n ? 1 : 0);
+}
+function decAbs(a) { return a.c < 0n ? { c: -a.c, e: a.e } : a; }
+function decQuantize2(a) {
+  if (a.e === -2) return { c: a.c, e: -2 };
+  if (a.e > -2) return { c: a.c * (10n ** BigInt(a.e + 2)), e: -2 };
+  var div = 10n ** BigInt(-2 - a.e);
+  var neg = a.c < 0n;
+  var abs = neg ? -a.c : a.c;
+  var q = abs / div;
+  var r = abs % div;
+  if (r * 2n >= div) q += 1n;
+  return { c: neg ? -q : q, e: -2 };
+}
+function moneyDec(a) { return decQuantize2(a); }
+function fmt2(a) { return decStr(decQuantize2(a)); }
+function pyRepr(v) {
+  if (v === null || v === undefined) return "None";
+  if (v === true) return "True";
+  if (v === false) return "False";
+  if (typeof v === "string") {
+    var esc = v.replace(/\\/g, "\\\\").replace(/\n/g, "\\n").replace(/\r/g, "\\r").replace(/\t/g, "\\t");
+    if (v.indexOf("'") >= 0 && v.indexOf('"') < 0) return '"' + esc + '"';
+    return "'" + esc.replace(/'/g, "\\'") + "'";
+  }
+  if (typeof v === "number") return String(v);
+  return JSON.stringify(v);
+}
+function pyStr(v) {
+  if (v === null || v === undefined) return "None";
+  if (v === true) return "True";
+  if (v === false) return "False";
+  return String(v);
+}
+var LINES = [
+  ["linehaul", "Linehaul", false],
+  ["fuel_surcharge", "Fuel surcharge", false],
+  ["detention", "Detention", true],
+  ["lumper", "Lumper", true],
+  ["other_accessorials", "Other accessorials", true]
+];
+var ALIASES = {
+  "linehaul": ["line_haul", "linehaul_amount"],
+  "fuel_surcharge": ["fsc", "fuel", "fuel_surcharge_amount"],
+  "detention": ["detention_pay", "detention_amount"],
+  "lumper": ["lumper_fee", "lumper_amount"],
+  "other_accessorials": ["other", "accessorials", "other_accessorial"]
+};
+var LOAD_NUMBER_KEYS = ["load_number", "load_id", "load", "id"];
+function DocError(msg) { this.message = msg; }
+DocError.prototype = Object.create(Error.prototype);
+function toDecimalRM(value, field) {
+  if (typeof value === "boolean") throw new DocError(field + " is not a number: " + pyRepr(value));
+  if (typeof value === "number" && !isFinite(value)) throw new DocError(field + " is not a number: " + pyRepr(value));
+  if (typeof value === "string" && /^\s*[+-]?(nan|inf(inity)?)\s*$/i.test(value)) throw new DocError(field + " is not a number: " + pyRepr(value));
+  var result;
+  try { result = Dec(value); }
+  catch (e) { throw new DocError(field + " is not a number: " + pyRepr(value)); }
+  return result;
+}
+function parseAmount(raw, field, loadNumber) {
+  if (raw === null || raw === undefined) return Dec(0);
+  var amount = toDecimalRM(raw, field + " for load " + loadNumber);
+  if (decCmp(amount, Dec(0)) < 0) throw new DocError(field + " for load " + loadNumber + " is negative: " + pyStr(raw));
+  return moneyDec(amount);
+}
+function parseOtherAccessorials(raw, loadNumber) {
+  if (raw === null || raw === undefined) return { items: {}, named: false };
+  if (typeof raw === "object" && !Array.isArray(raw)) {
+    var items = {};
+    Object.keys(raw).forEach(function (name) {
+      items[String(name)] = parseAmount(raw[name], "other accessorial " + pyRepr(name), loadNumber);
+    });
+    return { items: items, named: true };
+  }
+  var single = {};
+  single["other"] = parseAmount(raw, "other_accessorials", loadNumber);
+  return { items: single, named: false };
+}
+function loadNumberOf(raw) {
+  for (var i = 0; i < LOAD_NUMBER_KEYS.length; i++) {
+    var value = raw[LOAD_NUMBER_KEYS[i]];
+    if (value !== null && value !== undefined && String(value).trim()) return String(value).trim();
+  }
+  return null;
+}
+function normalizeLoad(raw, source) {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+    throw new DocError(source + ": load entry is not an object: " + pyRepr(raw));
+  }
+  var loadNumber = loadNumberOf(raw);
+  if (loadNumber === null) throw new DocError(source + ": load entry is missing a load number");
+  var lines = {};
+  LINES.forEach(function (entry) {
+    var key = entry[0];
+    if (key === "other_accessorials") return;
+    var value = null;
+    var candidates = [key].concat(ALIASES[key]);
+    for (var i = 0; i < candidates.length; i++) {
+      if (raw[candidates[i]] !== null && raw[candidates[i]] !== undefined) { value = raw[candidates[i]]; break; }
+    }
+    lines[key] = parseAmount(value, key, loadNumber);
+  });
+  var otherRaw = null;
+  var otherCandidates = ["other_accessorials"].concat(ALIASES["other_accessorials"]);
+  for (var j = 0; j < otherCandidates.length; j++) {
+    if (raw[otherCandidates[j]] !== null && raw[otherCandidates[j]] !== undefined) { otherRaw = raw[otherCandidates[j]]; break; }
+  }
+  var parsed = parseOtherAccessorials(otherRaw, loadNumber);
+  lines["other_accessorials"] = parsed.items;
+  lines["_other_named"] = parsed.named;
+  return { loadNumber: loadNumber, lines: lines };
+}
+function loadDocument(text, source) {
+  var data;
+  try { data = JSON.parse(text); }
+  catch (e) { throw new DocError("invalid JSON in " + source + " document: " + e.message); }
+  if (Array.isArray(data)) return data;
+  if (data && typeof data === "object") {
+    var keys = ["loads", "entries", "data"];
+    for (var i = 0; i < keys.length; i++) {
+      if (Array.isArray(data[keys[i]])) return data[keys[i]];
+    }
+    if (loadNumberOf(data) !== null) return [data];
+  }
+  throw new DocError(source + " must be a JSON list, an object with a loads list, or a single load object");
+}
+function indexLoads(rawEntries, source, errors, findings) {
+  var index = {};
+  rawEntries.forEach(function (raw) {
+    var norm;
+    try { norm = normalizeLoad(raw, source); }
+    catch (e) { errors.push(e.message); return; }
+    if (Object.prototype.hasOwnProperty.call(index, norm.loadNumber)) {
+      findings.push({
+        load_number: norm.loadNumber, line: null, type: "duplicate_load", severity: "error",
+        ratecon_amount: null, invoice_amount: null, difference: null,
+        message: "duplicate load number " + norm.loadNumber + " in " + source + " file; only the first entry was compared"
+      });
+      return;
+    }
+    index[norm.loadNumber] = norm.lines;
+  });
+  return index;
+}
+function compareOther(rateconItems, invoiceItems, rateconNamed, invoiceNamed) {
+  if (rateconNamed && invoiceNamed) {
+    var names = Array.from(new Set(Object.keys(rateconItems).concat(Object.keys(invoiceItems)))).sort();
+    return names.map(function (name) {
+      return ["other_accessorials:" + name, "Other: " + name,
+        rateconItems[name] || Dec(0), invoiceItems[name] || Dec(0)];
+    });
+  }
+  var rateconTotal = Dec(0), invoiceTotal = Dec(0);
+  Object.keys(rateconItems).forEach(function (k) { rateconTotal = decAdd(rateconTotal, rateconItems[k]); });
+  Object.keys(invoiceItems).forEach(function (k) { invoiceTotal = decAdd(invoiceTotal, invoiceItems[k]); });
+  return [["other_accessorials", "Other accessorials", rateconTotal, invoiceTotal]];
+}
+function compareLoad(loadNumber, rateconLines, invoiceLines, tolerance) {
+  var lineRecords = [], findings = [], comparisons = [];
+  LINES.forEach(function (entry) {
+    var key = entry[0], label = entry[1];
+    if (key === "other_accessorials") {
+      comparisons = comparisons.concat(compareOther(rateconLines[key], invoiceLines[key], rateconLines["_other_named"], invoiceLines["_other_named"]));
+    } else {
+      comparisons.push([key, label, rateconLines[key], invoiceLines[key]]);
+    }
+  });
+  comparisons.forEach(function (cmp) {
+    var key = cmp[0], label = cmp[1], rateconAmount = cmp[2], invoiceAmount = cmp[3];
+    var difference = moneyDec(decSub(invoiceAmount, rateconAmount));
+    var isAccessorial = key.indexOf("detention") === 0 || key.indexOf("lumper") === 0 || key.indexOf("other_accessorials") === 0;
+    var status;
+    if (decCmp(decAbs(difference), tolerance) <= 0) status = "match";
+    else if (decCmp(difference, Dec(0)) < 0 && decCmp(invoiceAmount, Dec(0)) === 0 && isAccessorial) status = "missing_accessorial";
+    else if (decCmp(difference, Dec(0)) < 0) status = "underbilled";
+    else if (decCmp(rateconAmount, Dec(0)) === 0) status = "invoice_only_charge";
+    else status = "overbilled";
+    lineRecords.push({ line: key, label: label, ratecon_amount: rateconAmount, invoice_amount: invoiceAmount, difference: difference, status: status });
+    if (status === "match") return;
+    var severity = (status === "underbilled" || status === "missing_accessorial") ? "error" : "warning";
+    var message;
+    var lower = label.toLowerCase();
+    if (status === "underbilled") {
+      message = "load " + loadNumber + " " + lower + " underbilled by $" + fmt2({ c: -difference.c, e: difference.e }) + " (ratecon $" + fmt2(rateconAmount) + ", invoice $" + fmt2(invoiceAmount) + ")";
+    } else if (status === "missing_accessorial") {
+      message = "load " + loadNumber + " " + lower + " of $" + fmt2(rateconAmount) + " on the ratecon is missing from the invoice";
+    } else if (status === "invoice_only_charge") {
+      message = "load " + loadNumber + " " + lower + " of $" + fmt2(invoiceAmount) + " on the invoice has no ratecon backing";
+    } else {
+      message = "load " + loadNumber + " " + lower + " overbilled by $" + fmt2(difference) + " (ratecon $" + fmt2(rateconAmount) + ", invoice $" + fmt2(invoiceAmount) + ")";
+    }
+    findings.push({ load_number: loadNumber, line: key, type: status, severity: severity, ratecon_amount: rateconAmount, invoice_amount: invoiceAmount, difference: difference, message: message });
+  });
+  return { lineRecords: lineRecords, findings: findings };
+}
+function loadTotal(lines) {
+  var total = Dec(0);
+  ["linehaul", "fuel_surcharge", "detention", "lumper"].forEach(function (key) { total = decAdd(total, lines[key]); });
+  Object.keys(lines["other_accessorials"]).forEach(function (k) { total = decAdd(total, lines["other_accessorials"][k]); });
+  return moneyDec(total);
+}
+function reconcile(rateconEntries, invoiceEntries, tolerance) {
+  var errors = [], findings = [];
+  var rateconIndex = indexLoads(rateconEntries, "ratecon", errors, findings);
+  var invoiceIndex = indexLoads(invoiceEntries, "invoice", errors, findings);
+  var loads = [];
+  Object.keys(rateconIndex).sort().forEach(function (loadNumber) {
+    var rateconLines = rateconIndex[loadNumber];
+    if (!Object.prototype.hasOwnProperty.call(invoiceIndex, loadNumber)) {
+      var rt = loadTotal(rateconLines);
+      findings.push({
+        load_number: loadNumber, line: null, type: "load_not_invoiced", severity: "error",
+        ratecon_amount: rt, invoice_amount: null, difference: null,
+        message: "load " + loadNumber + " is on the ratecon ($" + fmt2(rt) + ") but has no invoice"
+      });
+      return;
+    }
+    var invoiceLines = invoiceIndex[loadNumber];
+    var compared = compareLoad(loadNumber, rateconLines, invoiceLines, tolerance);
+    findings = findings.concat(compared.findings);
+    var rateconTotal = loadTotal(rateconLines);
+    var invoiceTotal = loadTotal(invoiceLines);
+    loads.push({
+      load_number: loadNumber,
+      status: compared.findings.length ? "mismatch" : "match",
+      lines: compared.lineRecords,
+      ratecon_total: rateconTotal, invoice_total: invoiceTotal,
+      difference: moneyDec(decSub(invoiceTotal, rateconTotal))
+    });
+  });
+  Object.keys(invoiceIndex).sort().forEach(function (loadNumber) {
+    if (Object.prototype.hasOwnProperty.call(rateconIndex, loadNumber)) return;
+    var invoiceLines = invoiceIndex[loadNumber];
+    var it = loadTotal(invoiceLines);
+    findings.push({
+      load_number: loadNumber, line: null, type: "load_no_ratecon", severity: "error",
+      ratecon_amount: null, invoice_amount: it, difference: null,
+      message: "load " + loadNumber + " is invoiced ($" + fmt2(it) + ") but has no ratecon"
+    });
+  });
+  var underbilledTotal = Dec(0);
+  findings.forEach(function (f) {
+    if (f.type === "underbilled" || f.type === "missing_accessorial") {
+      underbilledTotal = decAdd(underbilledTotal, { c: -f.difference.c, e: f.difference.e });
+    }
+  });
+  underbilledTotal = moneyDec(underbilledTotal);
+  var invoiceOnlyTotal = Dec(0);
+  findings.forEach(function (f) {
+    if (f.type === "invoice_only_charge") invoiceOnlyTotal = decAdd(invoiceOnlyTotal, f.invoice_amount);
+  });
+  invoiceOnlyTotal = moneyDec(invoiceOnlyTotal);
+  var rateconGrand = Dec(0), invoiceGrand = Dec(0);
+  loads.forEach(function (item) {
+    rateconGrand = decAdd(rateconGrand, item.ratecon_total);
+    invoiceGrand = decAdd(invoiceGrand, item.invoice_total);
+  });
+  rateconGrand = moneyDec(rateconGrand);
+  invoiceGrand = moneyDec(invoiceGrand);
+  return {
+    loads: loads, findings: findings, errors: errors,
+    totals: {
+      loads_compared: loads.length,
+      matched: loads.filter(function (i) { return i.status === "match"; }).length,
+      mismatched: loads.filter(function (i) { return i.status === "mismatch"; }).length,
+      underbilled_total: underbilledTotal, invoice_only_total: invoiceOnlyTotal,
+      ratecon_total: rateconGrand, invoice_total: invoiceGrand,
+      difference: moneyDec(decSub(invoiceGrand, rateconGrand))
+    }
+  };
+}
+function formatText(report) {
+  var lines = [];
+  report.loads.forEach(function (item) {
+    if (item.status === "match") lines.push("Load " + item.load_number + ": MATCH");
+    else {
+      var underbilled = Dec(0);
+      item.lines.forEach(function (line) {
+        if (line.status === "underbilled" || line.status === "missing_accessorial") {
+          underbilled = decAdd(underbilled, { c: -line.difference.c, e: line.difference.e });
+        }
+      });
+      lines.push("Load " + item.load_number + ": MISMATCH (underbilled $" + fmt2(underbilled) + ")");
+    }
+    item.lines.forEach(function (line) {
+      lines.push("  " + line.label + ": ratecon $" + fmt2(line.ratecon_amount) + ", invoice $" + fmt2(line.invoice_amount) + ", " + line.status.replace(/_/g, " "));
+    });
+    lines.push("  totals: ratecon $" + fmt2(item.ratecon_total) + ", invoice $" + fmt2(item.invoice_total) + ", difference $" + fmt2(item.difference));
+    lines.push("");
+  });
+  if (report.findings.length) {
+    lines.push("Findings:");
+    report.findings.forEach(function (finding) {
+      lines.push(finding.severity.toUpperCase() + ": " + finding.message);
+    });
+    lines.push("");
+  }
+  var totals = report.totals;
+  lines.push("Loads compared: " + totals.loads_compared + ", matched: " + totals.matched + ", mismatched: " + totals.mismatched + ", underbilled: $" + fmt2(totals.underbilled_total) + ", invoice-only charges: $" + fmt2(totals.invoice_only_total));
+  lines.push("Totals: ratecon $" + fmt2(totals.ratecon_total) + ", invoice $" + fmt2(totals.invoice_total) + ", difference $" + fmt2(totals.difference));
+  report.errors.forEach(function (error) { lines.push("ERROR: " + error); });
+  return lines.join("\n") + "\n";
+}
+window.runTool = function (inputText, options) {
+  options = options || {};
+  var tolerance;
+  try { tolerance = Dec(options.tolerance === undefined || options.tolerance === null || options.tolerance === "" ? "0.01" : String(options.tolerance)); }
+  catch (e) { return "ERROR: tolerance is not a number\n"; }
+  if (decCmp(tolerance, Dec(0)) < 0) return "ERROR: --tolerance must not be negative\n";
+  var rateconEntries, invoiceEntries;
+  try {
+    rateconEntries = loadDocument(inputText == null ? "" : String(inputText), "ratecon");
+    invoiceEntries = loadDocument(options.invoiceText == null ? "" : String(options.invoiceText), "invoice");
+  } catch (e) { return "ERROR: " + e.message + "\n"; }
+  var report = reconcile(rateconEntries, invoiceEntries, tolerance);
+  return formatText(report);
+};
+</script>
+<script>
+var SAMPLE_RATECON = `{
+  "loads": [
+    {
+      "broker": "BluePeak Logistics",
+      "destination": "Atlanta, GA",
+      "detention": 150.0,
+      "fuel_surcharge": 425.5,
+      "linehaul": 1850.0,
+      "load_number": "48213",
+      "lumper": 85.0,
+      "origin": "Dallas, TX",
+      "other_accessorials": 0
+    }
+  ]
+}`;
+var SAMPLE_INVOICE = `{
+  "loads": [
+    {
+      "carrier": "Dispatch Authority",
+      "detention": 150.0,
+      "fuel_surcharge": 425.5,
+      "linehaul": 1850.0,
+      "load_number": "48213",
+      "lumper": 85.0,
+      "other_accessorials": 0
+    }
+  ]
+}`;
+var SAMPLE_RATECON_MISMATCH = `{
+  "loads": [
+    {
+      "broker": "BluePeak Logistics",
+      "destination": "Memphis, TN",
+      "detention": 225.0,
+      "fuel_surcharge": 462.0,
+      "linehaul": 2100.0,
+      "load_number": "48214",
+      "lumper": 0,
+      "origin": "Fort Worth, TX",
+      "other_accessorials": {
+        "tarp fee": 65.0
+      }
+    }
+  ]
+}`;
+var SAMPLE_INVOICE_MISMATCH = `{
+  "loads": [
+    {
+      "carrier": "Dispatch Authority",
+      "fuel_surcharge": 462.0,
+      "linehaul": 1950.0,
+      "load_number": "48214",
+      "lumper": 120.0,
+      "other_accessorials": {
+        "tarp fee": 65.0
+      }
+    }
+  ]
+}`;
+var SAMPLE_RATECON_DUPLICATE = `{
+  "loads": [
+    {
+      "detention": 0,
+      "fuel_surcharge": 300.0,
+      "linehaul": 1400.0,
+      "load_number": "48216",
+      "lumper": 0,
+      "other_accessorials": 0
+    },
+    {
+      "detention": 75.0,
+      "fuel_surcharge": 300.0,
+      "linehaul": 1400.0,
+      "load_number": "48216",
+      "lumper": 0,
+      "other_accessorials": 0
+    }
+  ]
+}`;
+var SAMPLE_INVOICE_DUPLICATE = `{
+  "loads": [
+    {
+      "detention": 0,
+      "fuel_surcharge": 300.0,
+      "linehaul": 1400.0,
+      "load_number": "48216",
+      "lumper": 0,
+      "other_accessorials": 0
+    }
+  ]
+}`;
+var inputEl = document.getElementById("input");
+var input2El = document.getElementById("input2");
+var outEl = document.getElementById("out");
+var lastReport = "";
+function bindFile(id, target) {
+  document.getElementById(id).addEventListener("change", function (ev) {
+    var f = ev.target.files && ev.target.files[0];
+    if (!f) return;
+    var reader = new FileReader();
+    reader.onload = function () { target.value = String(reader.result || ""); };
+    reader.readAsText(f);
+  });
+}
+bindFile("file1", inputEl);
+bindFile("file2", input2El);
+document.getElementById("sample").addEventListener("click", function () { inputEl.value = SAMPLE_RATECON; input2El.value = SAMPLE_INVOICE; });
+document.getElementById("sample-mismatch").addEventListener("click", function () { inputEl.value = SAMPLE_RATECON_MISMATCH; input2El.value = SAMPLE_INVOICE_MISMATCH; });
+document.getElementById("sample-duplicate").addEventListener("click", function () { inputEl.value = SAMPLE_RATECON_DUPLICATE; input2El.value = SAMPLE_INVOICE_DUPLICATE; });
+document.getElementById("run").addEventListener("click", function () {
+  var options = { invoiceText: input2El.value, tolerance: document.getElementById("opt-tolerance").value };
+  try {
+    lastReport = window.runTool(inputEl.value, options);
+    outEl.textContent = lastReport;
+  } catch (e) {
+    lastReport = "ERROR: " + e.message + "\n";
+    outEl.textContent = lastReport;
+  }
+});
+document.getElementById("download").addEventListener("click", function () {
+  var text = lastReport || outEl.textContent;
+  var blob = new Blob([text], { type: "text/plain" });
+  var url = URL.createObjectURL(blob);
+  var a = document.createElement("a");
+  a.href = url;
+  a.download = "rate-match-report.txt";
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+});
+</script>
+</body>
+</html>

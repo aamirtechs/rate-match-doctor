@@ -1,4 +1,5 @@
 # rate-match-doctor
+**Live tool:** https://aamirtechs.github.io/rate-match-doctor/ (runs in your browser, no install)
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://github.com/aamirtechs/rate-match-doctor/blob/main/LICENSE) [![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](https://github.com/aamirtechs/rate-match-doctor/issues)
 
